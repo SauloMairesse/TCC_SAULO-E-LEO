@@ -1,0 +1,48 @@
+pkg load control;
+
+% --- 1. DADOS DO MOTOR ---
+J  = 0.00065;   % Inércia (kg.m^2)
+Ra = 10.3;      % Resistência (Ohms)
+K  = 0.5792;    % Constante (N.m/A ou V/(rad/s))
+La = 0.128;     % Indutância (Henry)
+b  = 0.00047    % Coeficiente de Atrito
+
+% --- 2. TENSÃO APLICADA ---
+V_aplicada = 80;
+
+% --- 3. MONTAGEM DA FUNÇÃO DE TRANSFERÊNCIA COMPLETA ---
+% Denominador: s^2*(La*J) + s*(Ra*J + La*B) + (Ra*B + K^2)
+ft_completa = [(J*La), (J*Ra+La*b), (K^2+Ra*b)]
+ft_simplificada = [(J*Ra), (K^2)]
+
+num = [K];
+den = [ft_completa];
+
+sys = tf(num, den);
+
+% --- 4. PLOTAGEM EM RPM ---
+figure;
+
+% Definição do tempo e entrada
+t = 0:0.001:0.2; % Ajuste o tempo final (2s) se necessário
+u = V_aplicada * ones(size(t));
+
+% Simulação (O resultado 'y_rads' sai em rad/s)
+[y_rads, t_out] = lsim(sys, u, t);
+
+% --- CONVERSÃO PARA RPM ---
+y_rpm = y_rads * (60 / (2 * pi));
+
+% Plotagem usando os dados em RPM
+plot(t_out, y_rpm, 'b', 'LineWidth', 2);
+grid on;
+title(['Velocidade do Motor para Entrada de ', num2str(V_aplicada), 'V']);
+xlabel('Tempo (s)');
+ylabel('Velocidade (RPM)'); % Eixo Y atualizado
+
+% Adicionar linha da velocidade teórica também convertida
+vel_final_teorica_rads = V_aplicada / K;
+vel_final_teorica_rpm = vel_final_teorica_rads * (60 / (2 * pi));
+
+yline(vel_final_teorica_rpm, 'r--', 'Velocidade Teórica (sem atrito)');
+legend('Simulação Realista (RPM)', 'Teórico Ideal (RPM)');
