@@ -1,0 +1,146 @@
+#include <Arduino.h>
+
+// PARÂMETROS ARDUINO
+#define PIN_ENCODER 2 // PINO LEITOR DO SENSOR DE VELOCIDADE
+#define PIN_PWM     9 // PINO SAÍDA SINAL PWM 
+#define PULSOS_POR_VOLTA 2 // QUANT. DE FREZAS NO DISCO ENCODER
+#define SIZE_MEMORY_LAST_RPM_VALUE 4 //TAMANHO DO ARRAY QUE SALVA AS ULTIMAS LEITURAS DE RPM
+#define DUTY_MIN 51     // DUTYCYCLE MINIMO (20%) 
+#define DUTY_MAX 204    // DUTYCYCLE MAXIMO (80%)
+
+// PARÂMETROS CONTROLADOR
+float Kp = 0.4;   // COEFICIENTE GANHO PROPORCIONAL
+float Ki = 2;   // COEFICIENTE GANHO INTEGRAL
+float Kd = 0.02;  // COEFICIENTE GANHO DERIVATIVO
+float alpha = 0.90; // COEFICIENTE DE SUAVIZACAO DA MUDANCA DO DUTYCICLE
+
+float rpm_ref = 1200.0; //VELOCIDADE DE REFERÊNCIA
+
+// DECLARAÇÃO DAS VARIÁVEIS
+uint32_t lastPulseTime = 0;
+uint32_t deltaBuffer[SIZE_MEMORY_LAST_RPM_VALUE]; // ARRAY QUE GUARDA AS VARIACOES DE TEMPO ENTRE OS PULSOS
+uint8_t bufIndex = 0;
+bool bufferFilled = false;
+
+int lastEncoderState = LOW;
+
+// VARIÀVEIS ERRO EM RELAÇÃO À REFERÊNCIA
+float erro = 0;
+float last_erro = 0;
+float duty = 60; // DUTY INICIAL
+float integrador = 0;
+
+// VELOCIDADE EM RPM
+float rpm = 0;
+
+/* Tempo */
+uint32_t t0;
+
+// CONFIGURAÇÃO ARDUINO SINAL PWM EM 10kHz
+void setupTimer1_10kHz() {
+  pinMode(PIN_PWM, OUTPUT);
+  noInterrupts();
+  TCCR1A = 0; TCCR1B = 0; TCNT1  = 0;
+  TCCR1A = (1 << COM1A1) | (1 << WGM11);
+  TCCR1B = (1 << WGM13) | (1 << WGM12) | (1 << CS10);
+  ICR1 = 1599; 
+  OCR1A = 0;
+  interrupts();
+}
+
+void setup() {
+  pinMode(PIN_ENCODER, INPUT_PULLUP);
+  setupTimer1_10kHz();
+  Serial.begin(230400);
+  t0 = micros();
+
+  for (int i = 0; i < SIZE_MEMORY_LAST_RPM_VALUE; i++) deltaBuffer[i] = 0;
+}
+
+void loop() {
+  //LEITURA DE VELOCIDADE POR PULLING
+  int state = digitalRead(PIN_ENCODER);
+  if (state != lastEncoderState && state == HIGH) {
+    uint32_t now = micros();
+    uint32_t delta = now - lastPulseTime;
+    lastPulseTime = now;
+    if (delta > 2000) { //2000 MICROSEGUNDOS, SE TRATA DE UM FILTRO DIGITAL.  
+      deltaBuffer[bufIndex++] = delta; // 
+      if (bufIndex >= SIZE_MEMORY_LAST_RPM_VALUE) {
+        bufIndex = 0;
+        bufferFilled = true;
+      }
+    }
+  }
+  lastEncoderState = state;
+
+  /* ===== Controle a cada 10 ms ===== */
+  static uint32_t lastControl = 0;
+  uint32_t now = micros();
+  // LOOP DE CONTROLE A CADA 10ms
+  if (now - lastControl >= 10000) {
+    lastControl = now;
+    /* ===== RPM médio ===== */
+    if (micros() - lastPulseTime > 500000) {
+        rpm = 0;
+    } else if (bufferFilled) {
+      uint64_t soma = 0;
+      for (int i = 0; i < SIZE_MEMORY_LAST_RPM_VALUE; i++) soma += deltaBuffer[i];
+      float deltaMed = (float)soma / SIZE_MEMORY_LAST_RPM_VALUE;
+      float freq = 1e6 / deltaMed;
+      rpm = (freq / PULSOS_POR_VOLTA) * 60.0;
+    }
+
+    /* ===== PID ===== */
+    float dt = 0.01; //PASSO DO TEMPO
+    erro = rpm_ref - rpm; //CALCULA A DISTANCIA ENTRE A VEL. REFERENCIA E A VEL. LIDA. 
+    // Proporcional
+    float P = Kp * erro;
+    // Integral
+    integrador += erro * dt;
+    //O VALOR DO INTEGRADOR É LIMITADO 
+    //PARA SE EVITAR QUE O ERRO CRESCA INFINITAMENTE.
+    integrador = constrain(integrador, -150, 150);
+    float I = Ki * integrador;
+    // Derivativo
+    float derivativo = (erro - last_erro) / dt;
+    float D = Kd * derivativo;
+    last_erro = erro;
+    // Saída Crua do PID (O que ele "quer" fazer)
+    float PID_SUM = P + I + D;
+    //O SOMATORIO DOS MEUS ERROS DEVE DAR O PROXIMO VALOR DO MEU DUTY
+    //AFIM DE CONTROLAR A TENSAO MEDIA DE SAIDA, QUE POR SUA VEZ
+    //CONTROLA A VELOCIDADE.
+    //ESSES VALORES PRECISAM ESTAR ENTRE OS LIMITES DE OPERACAO ESTABELECIDOS
+    //ESTABELECIDOS PARA O DUTYCYCLE
+    PID_SUM = constrain(PID_SUM, DUTY_MIN, DUTY_MAX); 
+
+    //FILTRO DE SUAVIZAÇÃO PARA O DUTY NAO TER VARIACOES ABRUPTAS
+    duty = (duty * alpha) + (PID_SUM * (1.0 - alpha));
+    // GARANTE QUE OS DUTYS VAO FICAR NOS LIMITES ESTABELECIDOS
+    if(duty < DUTY_MIN) duty = DUTY_MIN;
+    if(duty > DUTY_MAX) duty = DUTY_MAX;
+
+    // REGRA DE 3 PARA RE CALCULAR O VALOR DO DUTYCYCLE
+    // NO PROXIMO LOOP DO SINAL PWM, E ARREDONDA PARA INTEIRO
+    uint16_t PWM_SIGNAL = (uint16_t)((duty * 1599.0) / 255.0);
+    OCR1A = PWM_SIGNAL;
+
+    /* ===== Telemetria ===== */
+    float tempo_s = (now - t0) * 1e-6;
+    Serial.print(tempo_s, 4);
+    Serial.print(",");
+    Serial.print(rpm_ref);
+    Serial.print(",");
+    Serial.print(rpm, 2);
+    Serial.print(",");
+    Serial.println(duty / 255.0, 3);
+  }
+
+  /* ===== Serial ===== */
+  if (Serial.available()) {
+    float val = Serial.parseFloat();
+    if (val > 0) rpm_ref = val;
+    while(Serial.available()) Serial.read();
+  }
+}

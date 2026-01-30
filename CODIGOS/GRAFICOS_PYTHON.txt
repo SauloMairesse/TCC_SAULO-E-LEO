@@ -1,0 +1,83 @@
+import serial
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+
+# ================= CONFIGURAÇÕES =================
+SERIAL_PORT = 'COM15' 
+BAUD_RATE = 230400 
+
+# ================= INICIALIZAÇÃO =================
+try:
+    arduino = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+    print(f"Conectado na {SERIAL_PORT}. O gráfico vai mostrar TODO o histórico.")
+    # Limpa o buffer inicial para evitar dados quebrados no começo
+    arduino.reset_input_buffer()
+except:
+    print(f"ERRO: Não foi possível abrir a porta {SERIAL_PORT}.")
+    exit()
+
+# Guardar o histórico de Dados infinito.
+times = []
+refs = []
+rpms = []
+duties = []
+
+# Configuração do Gráfico.
+plt.style.use('dark_background')
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+fig.suptitle('Monitoramento PID - Histórico Completo', fontsize=16)
+
+# Linhas do gráfico
+line_ref, = ax1.plot([], [], 'c--', label='SetPoint', alpha=0.7)
+line_rpm, = ax1.plot([], [], 'y-', label='RPM Medido', linewidth=1.5)
+line_duty, = ax2.plot([], [], 'm-', label='Duty Cycle', linewidth=1.5)
+# === EIXO Y ===
+ax1.set_ylabel('Velocidade (RPM)')
+ax1.set_ylim(0, 2000)  # <--- FIXO ENTRE 0 E 2000 RPM
+ax1.legend(loc='upper right')
+ax1.grid(True, alpha=0.3)
+# Configurações do gráfico de Duty
+ax2.set_ylabel('Duty Cycle (%)')
+ax2.set_xlabel('Tempo (s)')
+ax2.set_ylim(0, 1.05) # Fixo de 0 a 100%
+ax2.legend(loc='upper right')
+ax2.grid(True, alpha=0.3)
+ax2.axhline(y=0.2, color='r', linestyle=':', alpha=0.5)
+ax2.axhline(y=0.8, color='r', linestyle=':', alpha=0.5)
+
+def update(frame):
+    # Lê tudo que estiver pendente no buffer para não atrasar
+    while arduino.in_waiting:
+        try:
+            line = arduino.readline().decode('utf-8').strip()
+            data = line.split(',')
+            
+            # Formato: Tempo, Ref, RPM, Duty
+            if len(data) == 4:
+                t = float(data[0])
+                ref = float(data[1])
+                r = float(data[2])
+                d = float(data[3])
+                
+                # Adiciona ao histórico (sem apagar os antigos)
+                times.append(t)
+                refs.append(ref)
+                rpms.append(r)
+                duties.append(d)
+                
+        except ValueError:
+            pass
+    # Atualiza as linhas com todos os dados acumulados
+    if times:
+        line_ref.set_data(times, refs)
+        line_rpm.set_data(times, rpms)
+        line_duty.set_data(times, duties)
+        # Ajusta o eixo X para mostrar do tempo inicial até o atual
+        ax1.set_xlim(times[0], times[-1] + 1)
+    return line_ref, line_rpm, line_duty
+
+# Intervalo de 50ms para não pesar tanto o processamento gráfico
+ani = FuncAnimation(fig, update, interval=50, blit=False)
+plt.show()
+
+arduino.close()
